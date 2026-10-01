@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die(){ printf '\n🛑 %s\n' "$*" >&2; exit 1; }
+ok(){ printf '✓ %s\n' "$*"; }
+note(){ printf '\n%s\n' "$*"; }
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die "Run inside the repository"
+cd "$ROOT"
+POLICY="$ROOT/.codex/orchestrator/policy.md"
+GUARDIAN="$ROOT/.codex/orchestrator/guardian.md"
+PHASES="$ROOT/.codex/orchestrator/phases.md"
+STATE="$ROOT/.codex/orchestrator/state.json"
+LOGDIR="$ROOT/.radmehr-agent/logs"
+mkdir -p "$LOGDIR"
+command -v codex >/dev/null 2>&1 || die "codex not found"
+
+safe_db_status(){
+  if [[ -n "${TEST_DATABASE_URL:-}" ]]; then ok "TEST_DATABASE_URL present (hidden)"; else note "• TEST_DATABASE_URL absent; DB integration may be skipped"; fi
+}
+
+secret_scan(){
+  local bad
+  bad="$(git status --porcelain | awk '{print $2}' | grep -Ei '(^|/)(\.env($|\.)|.*kube.*config|.*\.pem$|.*\.key$|id_rsa|id_ed25519|.*credentials.*|.*dump.*\.sql$)' || true)"
+  [[ -z "$bad" ]] || return 1
+  if git diff --no-ext-diff -- . ':!package-lock.json' | grep -Eqi '(BEGIN (RSA |OPENSSH )?PRIVATE KEY|postgres(ql)?://[^[:space:]]+:[^[:space:]]+@|api[_-]?key[[:space:]]*[:=]|token[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._-]{20,})'; then return 1; fi
+}
+
+forbidden_diff_scan(){
+  ! git diff --no-ext-diff | grep -Eqi '(dangerously-bypass-approvals-and-sandbox|danger-full-access|git[[:space:]]+push[[:space:]].*--force|git[[:space:]]+reset[[:space:]]+--hard|kubectl[[:space:]]+delete[[:space:]]+(namespace|pvc|pv)|DROP[[:space:]]+DATABASE|DROP[[:space:]]+SCHEMA|npm[[:space:]]+audit[[:space:]]+fix[[:space:]]+--force)'
+}
+
+run_validation(){
+  note "══ Deterministic validation ══"
+  if [[ -f package.json ]]; then
+    if npm run | grep -qE '(^|[[:space:]])check($|[[:space:]])'; then npm run check; else
+      npm run | grep -qE '(^|[[:space:]])typecheck($|[[:space:]])' && npm run typecheck || true
+      npm run | grep -qE '(^|[[:space:]])lint($|[[:space:]])' && npm run lint || true
+      npm run | grep -qE '(^|[[:space:]])test($|[[:space:]])' && npm test || true
+    fi
+    npm run | grep -qE '(^|[[:space:]])build($|[[:space:]])' && npm run build || true
+    if [[ -n "${TEST_DATABASE_URL:-}" ]] && npm run | grep -qE '(^|[[:space:]])test:db($|[[:space:]])'; then npm run test:db; fi
+  fi
+  git diff --check
+  ok "deterministic validation passed"
+}
+
+guardian_review(){
+  local phase_file="${1:-}" log prompt rc
+  log="$LOGDIR/guardian-$(date +%Y%m%d-%H%M%S).log"
+  prompt="$(cat "$POLICY"; printf '\n\n'; cat "$GUARDIAN"; printf '\n\n'; cat "$PHASES"; printf '\n\n'; [[ -n "$phase_file" && -f "$phase_file" ]] && cat "$phase_file" || true; printf '\n\nPerform an independent READ-ONLY review of the current working tree. Inspect git status and git diff yourself. Do not edit, stage, commit, push, install packages, access production systems, or request sandbox escalation.\n')"
+  note "══ Guardian ══"
+  set +e
+  codex exec --sandbox read-only "$prompt" 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  [[ $rc -eq 0 ]] || die "Guardian could not complete safely; failing closed"
+  decision="$(grep '^GUARDIAN_DECISION: ' "$log" | tail -n 1 || true)"
+  [[ "$decision" == "GUARDIAN_DECISION: PASS" ]] || die "Guardian did not return final PASS; failing closed"
+  ok "Guardian PASS"
+}
+
+implement_phase(){
+  local phase_file="$1" log prompt rc
+  [[ -f "$phase_file" ]] || die "Missing phase file: $phase_file"
+  log="$LOGDIR/implementer-$(date +%Y%m%d-%H%M%S).log"
+  prompt="$(cat "$POLICY"; printf '\n\n'; cat "$PHASES"; printf '\n\n'; cat "$phase_file"; printf '\n\nYou are the Implementer. Work autonomously inside the repository workspace only. Do not push, deploy, force Git operations, access production infrastructure, print secrets, or weaken safety controls. Use the smallest coherent implementation. Run relevant checks. If sandboxing blocks a required risky/network operation, do not request escalation; stop and report it. At the very end output exactly one line: IMPLEMENTER_DECISION: COMPLETE or IMPLEMENTER_DECISION: BLOCK.\n')"
+  note "══ Implementer ══"
+  set +e
+  codex exec --sandbox workspace-write "$prompt" 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  [[ $rc -eq 0 ]] || die "Implementer process failed; no escalation granted"
+  decision="$(grep '^IMPLEMENTER_DECISION: ' "$log" | tail -n 1 || true)"
+  [[ "$decision" == "IMPLEMENTER_DECISION: COMPLETE" ]] || die "Implementer did not report COMPLETE; failing closed"
+}
+
+checkpoint_commit(){
+  local msg="$1"
+  note "══ Checkpoint gate ══"
+  forbidden_diff_scan || die "Forbidden pattern detected in diff"
+  secret_scan || die "Secret-safety scan failed"
+  git add -A
+  git reset -q -- '.env' '.env.*' '.radmehr-agent' 2>/dev/null || true
+  if git diff --cached --name-only | grep -Ei '(^|/)(\.env($|\.)|.*kube.*config|.*\.pem$|.*\.key$|id_rsa|id_ed25519|.*credentials.*|.*dump.*\.sql$)' >/dev/null; then git reset -q; die "Protected file would be committed; staging cleared"; fi
+  git diff --cached --check || { git reset -q; die "Staged diff check failed; staging cleared"; }
+  git commit -m "$msg"
+  ok "local checkpoint commit created"
+  note "Push remains disabled"
+}
+
+status_cmd(){
+  note "Radmehr Development Orchestrator"
+  printf 'Repository: %s\nBranch: %s\n' "$ROOT" "$(git branch --show-current)"
+  safe_db_status
+  printf '\nGit status:\n'; git status --short
+  printf '\nState:\n'; cat "$STATE"
+}
+
+case "${1:-status}" in
+  status) status_cmd ;;
+  validate)
+    safe_db_status; forbidden_diff_scan || die "Forbidden pattern in diff"; secret_scan || die "Secret scan failed"; run_validation; guardian_review "" ;;
+  checkpoint-phase1)
+    forbidden_diff_scan || die "Forbidden pattern in diff"; secret_scan || die "Secret scan failed"; run_validation; guardian_review ""; checkpoint_commit "feat: establish PostgreSQL foundation" ;;
+  phase2)
+    safe_db_status; implement_phase "$ROOT/.codex/orchestrator/phase-2.md"; forbidden_diff_scan || die "Forbidden pattern in diff"; secret_scan || die "Secret scan failed"; run_validation; guardian_review "$ROOT/.codex/orchestrator/phase-2.md"; note "✅ Phase 2 passed local validation + Guardian. No push/deploy." ;;
+  checkpoint-phase2)
+    forbidden_diff_scan || die "Forbidden pattern in diff"; secret_scan || die "Secret scan failed"; run_validation; guardian_review "$ROOT/.codex/orchestrator/phase-2.md"; checkpoint_commit "feat: establish server authentication" ;;
+  *)
+    printf '%s\n' 'Usage:' '  scripts/radmehr-agent status' '  scripts/radmehr-agent validate' '  scripts/radmehr-agent checkpoint-phase1' '  scripts/radmehr-agent phase2' '  scripts/radmehr-agent checkpoint-phase2'; exit 2 ;;
+esac

@@ -1,0 +1,14 @@
+{
+  "project": "Radmehr-Ai-dash",
+  "version": 1,
+  "phase": 2,
+  "phase_name": "Authentication cutover",
+  "status": "ready",
+  "next_phase": 3,
+  "next_phase_name": "Authorization and domain migration",
+  "autonomy": "guarded_auto",
+  "allow_push": false,
+  "allow_deploy": false,
+  "allow_force_git": false,
+  "allow_production_db_mutation": false
+}

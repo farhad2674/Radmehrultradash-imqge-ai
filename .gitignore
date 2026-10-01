@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local Radmehr agent runtime logs
+.radmehr-agent/
+
+# Private runtime storage
+private-data/
+uploads/

@@ -1,0 +1,252 @@
+name: Radmehr Phase 2 Guarded Agent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: radmehr-phase2-agent
+  cancel-in-progress: false
+
+env:
+  CODEX_MODEL: openai/gpt-5.6-sol
+  OPENROUTER_RESPONSES_ENDPOINT: https://openrouter.ai/api/v1/responses
+
+jobs:
+  implementer:
+    name: Implementer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build implementer prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat .codex/orchestrator/policy.md
+            printf '\n\n'
+            cat .codex/orchestrator/phase-2.md
+            printf '\n\n'
+            cat <<'EOF'
+          Execution contract for this run:
+          - Inspect before editing.
+          - Do not commit, push, deploy, alter GitHub Actions, or modify orchestrator safety files.
+          - Do not use production credentials or production databases.
+          - Keep changes strictly within Phase 2 authentication scope.
+          - At the very end output exactly one line:
+            IMPLEMENTER_DECISION: COMPLETE
+            or
+            IMPLEMENTER_DECISION: BLOCK
+          EOF
+          } > /tmp/radmehr-implementer-prompt.md
+
+      - name: Run Codex implementer
+        id: implementer
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
+        with:
+          openai-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          responses-api-endpoint: ${{ env.OPENROUTER_RESPONSES_ENDPOINT }}
+          permission-profile: ':workspace'
+          model: ${{ env.CODEX_MODEL }}
+          prompt-file: /tmp/radmehr-implementer-prompt.md
+          output-file: /tmp/implementer-result.txt
+          safety-strategy: drop-sudo
+
+      - name: Verify implementer decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          decision="$(grep '^IMPLEMENTER_DECISION: ' /tmp/implementer-result.txt | tail -n 1 || true)"
+          if [ "$decision" != 'IMPLEMENTER_DECISION: COMPLETE' ]; then
+            echo "Implementer did not report COMPLETE; failing closed." >&2
+            exit 1
+          fi
+
+      - name: Enforce protected-path scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -N .
+          changed="$(git diff --name-only HEAD)"
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -E '^(\.github/workflows/|\.codex/orchestrator/(policy|guardian|phases|state)\.md|scripts/radmehr-agent$)' ; then
+            echo "Protected orchestration files were modified; failing closed." >&2
+            exit 1
+          fi
+
+      - name: Create patch and basic integrity checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check HEAD
+          git diff --binary HEAD > /tmp/phase2.patch
+          test -s /tmp/phase2.patch
+          if grep -E '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|postgresql://[^[:space:]]+:[^[:space:]]+@)' /tmp/phase2.patch; then
+            echo "Potential secret material detected in patch; failing closed." >&2
+            exit 1
+          fi
+
+      - name: Upload implementation patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-implementation
+          path: |
+            /tmp/phase2.patch
+            /tmp/implementer-result.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    name: Deterministic validator
+    needs: implementer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: radmehr_test
+          POSTGRES_PASSWORD: radmehr_test_password
+          POSTGRES_DB: radmehr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U radmehr_test -d radmehr_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      TEST_DATABASE_URL: postgresql://radmehr_test:radmehr_test_password@127.0.0.1:5432/radmehr_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download implementation
+        uses: actions/download-artifact@v4
+        with:
+          name: phase2-implementation
+          path: /tmp/phase2-implementation
+
+      - name: Apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check /tmp/phase2-implementation/phase2.patch
+          git apply /tmp/phase2-implementation/phase2.patch
+          git diff --check HEAD
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run quality gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run test:db
+          {
+            echo 'VALIDATOR_DECISION: PASS'
+            echo 'Commands passed:'
+            echo '- npm run check'
+            echo '- npm run test:db'
+            echo '- git diff --check HEAD'
+          } > /tmp/validator-summary.txt
+
+      - name: Upload validated patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-validated
+          path: |
+            /tmp/phase2-implementation/phase2.patch
+            /tmp/validator-summary.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  guardian:
+    name: Independent guardian
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: phase2-validated
+          path: /tmp/phase2-validated
+
+      - name: Apply validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check /tmp/phase2-validated/phase2.patch
+          git apply /tmp/phase2-validated/phase2.patch
+          git diff --check HEAD
+
+      - name: Build guardian prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat .codex/orchestrator/guardian.md
+            printf '\n\n# Current phase\n'
+            cat .codex/orchestrator/phase-2.md
+            printf '\n\n# Deterministic validator result\n'
+            cat /tmp/phase2-validated/validator-summary.txt
+            printf '\n\nReview the applied working-tree diff against HEAD. Do not edit files.\n'
+          } > /tmp/radmehr-guardian-prompt.md
+
+      - name: Run Codex guardian
+        id: guardian
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
+        with:
+          openai-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          responses-api-endpoint: ${{ env.OPENROUTER_RESPONSES_ENDPOINT }}
+          permission-profile: ':read-only'
+          model: ${{ env.CODEX_MODEL }}
+          prompt-file: /tmp/radmehr-guardian-prompt.md
+          output-file: /tmp/guardian-result.txt
+          safety-strategy: drop-sudo
+
+      - name: Verify guardian decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          decision="$(grep '^GUARDIAN_DECISION: ' /tmp/guardian-result.txt | tail -n 1 || true)"
+          if [ "$decision" != 'GUARDIAN_DECISION: PASS' ]; then
+            echo "Guardian did not return final PASS; failing closed." >&2
+            exit 1
+          fi
+
+      - name: Upload approved result
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-approved
+          path: |
+            /tmp/phase2-validated/phase2.patch
+            /tmp/phase2-validated/validator-summary.txt
+            /tmp/guardian-result.txt
+          if-no-files-found: error
+          retention-days: 7

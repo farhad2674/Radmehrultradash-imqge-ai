@@ -35,6 +35,8 @@ describe('diskStore', () => {
 
     expect(fs.existsSync(path.join(dataDir, 'templates.json'))).toBe(true);
     expect(fs.existsSync(uploadsDir)).toBe(true);
+    expect(store.getTemplatesFromDisk()).toEqual([]);
+    expect(store.getAssetsFromDisk()).toEqual([]);
 
     const template: import('../src/types').ApplianceTemplate = {
       id: 'template-1',

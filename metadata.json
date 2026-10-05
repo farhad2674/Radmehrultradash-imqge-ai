@@ -2,7 +2,5 @@
   "name": "RadmehrAI Studio — aimaxmode",
   "description": "aimaxmode development dashboard with PostgreSQL login, server authorization, per-user API quotas, template management, and appliance image generation.",
   "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "majorCapabilities": []
 }

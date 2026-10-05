@@ -1,16 +1,14 @@
-import { GoogleGenAI } from '@google/genai';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getUploadsDir, MAX_IMAGE_BYTES, saveImageBase64ToDisk } from './diskStore';
 import { safeImageUrl } from './contentSecurity';
+import { completeWithOpenRouter, resolveOpenRouterModel } from './openRouter';
 
-let ai: GoogleGenAI | undefined;
-function getAI() {
-  if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') return undefined;
-  return ai ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY, httpOptions: { timeout: 240000 } });
+export function imageProviderModel(needsReferenceImage = false) {
+  return resolveOpenRouterModel('image', needsReferenceImage);
 }
-export function imageProviderModel() {
-  return process.env.OPENROUTER_API_KEY ? process.env.OPENROUTER_IMAGE_MODEL || 'google/gemini-2.5-flash-image-preview' : 'gemini-3.1-flash-lite-image';
+export function promptProviderModel() {
+  return resolveOpenRouterModel('text');
 }
 function referenceForProvider(url: string) {
   if (!url.startsWith('/uploads/')) return url;
@@ -39,47 +37,29 @@ async function persistImage(url: string, ownerUserId: string) {
   } finally { await reader.cancel(); }
   return saveImageBase64ToDisk(Buffer.concat(chunks).toString('base64'), (response.headers.get('content-type') || '').split(';')[0], ownerUserId);
 }
-export interface ImageRequest { prompt: string; aspectRatio: string; resolution?: string; referenceImageUrl?: string }
+export interface ImageRequest { prompt: string; aspectRatio: string; resolution?: string; referenceImageUrl?: string; selectedModel?: string }
 export async function generateImage(params: ImageRequest, ownerUserId: string): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  if (apiKey) {
-    const content: any[] = [{ type: 'text', text: `${params.prompt}\nCreate one image. Aspect ratio: ${params.aspectRatio}; resolution: ${params.resolution || '1K'}.` }];
-    if (params.referenceImageUrl) content.push({ type: 'image_url', image_url: { url: referenceForProvider(params.referenceImageUrl) } });
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: imageProviderModel(), messages: [{ role: 'user', content }], modalities: ['image', 'text'] }),
-      signal: AbortSignal.timeout(240000),
-    });
-    if (!response.ok) throw new Error('Provider request failed.');
-    const data = await response.json();
-    const message = data?.choices?.[0]?.message;
-    const images = [...(Array.isArray(message?.images) ? message.images : []), ...(Array.isArray(message?.content) ? message.content : [])];
-    for (const item of images) {
-      const url = item?.image_url?.url || item?.imageUrl?.url || item?.url;
-      if (typeof url === 'string') return persistImage(url, ownerUserId);
-    }
-    throw new Error('Provider returned no image.');
+  const selectedModel = params.selectedModel || await imageProviderModel(Boolean(params.referenceImageUrl));
+  const content: any[] = [{ type: 'text', text: `${params.prompt}\nCreate one image. Aspect ratio: ${params.aspectRatio}; resolution: ${params.resolution || '1K'}.` }];
+  if (params.referenceImageUrl) content.push({ type: 'image_url', image_url: { url: referenceForProvider(params.referenceImageUrl) } });
+  const data = await completeWithOpenRouter({
+    model: selectedModel, messages: [{ role: 'user', content }], modalities: ['image'],
+  });
+  const message = data?.choices?.[0]?.message;
+  const images = [...(Array.isArray(message?.images) ? message.images : []), ...(Array.isArray(message?.content) ? message.content : [])];
+  for (const item of images) {
+    const url = item?.image_url?.url || item?.imageUrl?.url || item?.url;
+    if (typeof url === 'string') return persistImage(url, ownerUserId);
   }
-  const client = getAI();
-  if (client) {
-    const parts: any[] = [{ text: params.prompt }];
-    if (params.referenceImageUrl) {
-      const reference = referenceForProvider(params.referenceImageUrl);
-      const match = reference.match(/^data:([^;]+);base64,(.+)$/s);
-      if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-    }
-    const response = await client.models.generateContent({ model: imageProviderModel(), contents: { parts }, config: { imageConfig: { aspectRatio: params.aspectRatio } } });
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData?.data) return saveImageBase64ToDisk(part.inlineData.data, part.inlineData.mimeType, ownerUserId);
-    }
-    throw new Error('Provider returned no image.');
-  }
-  throw new Error('No image provider configured.');
+  throw new Error('Provider returned no image.');
 }
-export async function optimizePrompt(basePrompt: string, category: string, model: string): Promise<string> {
-  const client = getAI();
-  if (!client) throw new Error('No prompt provider configured.');
-  const response = await client.models.generateContent({ model: 'gemini-3.7-flash', contents:
-    `Optimize this product photography prompt for ${model}. Preserve variable placeholders. Return only the prompt. Category: ${category}. Prompt: ${basePrompt}` });
-  return response.text?.trim() || basePrompt;
+export async function optimizePrompt(basePrompt: string, category: string, model: string, selectedModel?: string): Promise<string> {
+  const response = await completeWithOpenRouter({
+    model: selectedModel || await promptProviderModel(),
+    messages: [{ role: 'user', content:
+      `Optimize this product photography prompt for ${model}. Preserve all variable placeholders exactly, including {{OBJECT}} and {{TEXT_ZONE}}. Return only the prompt. Category: ${category}. Prompt: ${basePrompt}` }],
+  });
+  const content = response?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) throw new Error('Provider returned no optimized prompt.');
+  return content.trim();
 }

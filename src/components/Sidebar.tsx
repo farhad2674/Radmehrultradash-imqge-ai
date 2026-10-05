@@ -136,7 +136,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <button
           id="nav-link-help"
-          onClick={() => alert('RadmehrAI Studio — aimaxmode development\nDocumentation & Support\n- AI Generation Limit Management (Default 50/user)\n- Direct OpenRouter Job Creation API & Polling System\n- Gemini Flash Image Engine\n- Enterprise Governance & RBAC')}
+          onClick={() => alert('RadmehrAI Studio — aimaxmode development\nDocumentation & Support\n- AI Generation Limit Management (Default 50/user)\n- Direct OpenRouter Job Creation API & Polling System\n- Latest compatible OpenRouter image and text models\n- Enterprise Governance & RBAC')}
           className="w-full flex items-center gap-3.5 px-3.5 py-2 rounded-xl text-xs font-medium text-[#414754] hover:bg-[#F1F4F9] hover:text-[#191c23] transition-colors cursor-pointer text-left"
         >
           <HelpCircle className="w-4 h-4 text-[#727785]" />

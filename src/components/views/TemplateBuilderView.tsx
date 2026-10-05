@@ -216,7 +216,7 @@ export const TemplateBuilderView: React.FC<TemplateBuilderViewProps> = ({
   const handleAutoOptimizePrompt = async () => {
     setOptimizationError(''); setIsOptimizing(true);
     try {
-      const res = await apiFetch('/api/gemini/optimize-prompt', {
+      const res = await apiFetch('/api/openrouter/optimize-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ basePrompt, category, model }),
@@ -432,7 +432,7 @@ export const TemplateBuilderView: React.FC<TemplateBuilderViewProps> = ({
                     onChange={(e) => setModel(e.target.value as ExecutionModel)}
                     className="w-full appearance-none px-4 py-2.5 bg-[#F1F4F9] border border-[#DADCE0] rounded-xl text-sm font-medium text-[#191c23] focus:outline-none focus:ring-2 focus:ring-[#1A73E8] focus:bg-white transition-all cursor-pointer pr-10"
                   >
-                    <option value="nano-banana-2">nano-banana-2 (Gemini Flash Image Engine)</option>
+                    <option value="nano-banana-2">Latest image model (OpenRouter)</option>
                     <option value="sedance-2.5-pro">sedance-2.5-pro (High-Fidelity Photorealism)</option>
                     <option value="SDXL">SDXL 1.0 (Commercial Industrial)</option>
                     <option value="Midjourney v6">Midjourney v6 (Artisan & Barista Render)</option>
@@ -905,7 +905,7 @@ export const TemplateBuilderView: React.FC<TemplateBuilderViewProps> = ({
                   className="px-4 py-2 rounded-full bg-gradient-to-r from-[#1A73E8] to-[#4648d4] hover:opacity-95 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer disabled:opacity-50"
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${isOptimizing ? 'animate-spin' : ''}`} />
-                  <span>{isOptimizing ? 'Optimizing with Gemini...' : '✨ Auto-Optimize Prompt'}</span>
+                  <span>{isOptimizing ? 'Optimizing with OpenRouter...' : '✨ Auto-Optimize Prompt'}</span>
                 </button>
               </div>
             </div>

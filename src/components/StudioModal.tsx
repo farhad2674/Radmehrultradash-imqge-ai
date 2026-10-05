@@ -483,7 +483,7 @@ export const StudioModal: React.FC<StudioModalProps> = ({
                               disabled={loading || isLimitReached}
                               className="w-full px-3.5 py-2.5 bg-[#F1F4F9] border border-[#DADCE0] rounded-xl text-sm font-medium text-[#191c23] focus:outline-none focus:ring-2 focus:ring-[#1A73E8] focus:bg-white transition-all cursor-pointer disabled:opacity-50"
                             >
-                              <option value="nano-banana-2">nano-banana-2 (Gemini Flash Image)</option>
+                              <option value="nano-banana-2">Latest image model (OpenRouter)</option>
                               <option value="seedream/5-pro-image-to-image">Seedream 5.0 Pro (Image to Image)</option>
                               <option value="sedance-2.5-pro">sedance-2.5-pro (High Res Appliance)</option>
                               <option value="SDXL">SDXL 1.0 (Commercial Industrial)</option>
@@ -926,7 +926,7 @@ export const StudioModal: React.FC<StudioModalProps> = ({
         <div className="hidden sm:flex px-6 py-3 bg-[#F8F9FD] border-t border-[#E0E2EC] items-center justify-between text-xs text-[#727785] shrink-0">
           <div className="flex items-center gap-1.5">
             <ShieldCheck className="w-4 h-4 text-blue-600" />
-            <span>OpenRouter Protocol & Google GenAI Certified Engine</span>
+            <span>Powered by OpenRouter</span>
           </div>
           <span>Quota: {userCompletedGenerations} / {userGenerationLimit} Images</span>
         </div>

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import templates from '../../data/templates.json';
 import {
   INITIAL_ASSETS,
   INITIAL_AUDIT_LOGS,
@@ -26,9 +25,9 @@ describe('initial application data', () => {
     });
   });
 
-  it('keeps checked-in template IDs unique and essential fields valid', () => {
+  it('keeps initial template IDs unique and essential fields valid', () => {
     const ids = new Set<string>();
-    for (const template of templates) {
+    for (const template of INITIAL_TEMPLATES) {
       expect(template.id).toBeTruthy();
       expect(template.name).toBeTruthy();
       expect(template.category).toBeTruthy();

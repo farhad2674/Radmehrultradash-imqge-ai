@@ -20,7 +20,7 @@ let root: string;
 let adminId: string;
 let userId: string;
 let otherId: string;
-let provider: { imageProviderModel: () => string; generateImage: ReturnType<typeof vi.fn<typeof import('./providers').generateImage>>; optimizePrompt: ReturnType<typeof vi.fn<typeof import('./providers').optimizePrompt>> };
+let provider: { imageProviderModel: () => Promise<string>; promptProviderModel: () => Promise<string>; generateImage: ReturnType<typeof vi.fn<typeof import('./providers').generateImage>>; optimizePrompt: ReturnType<typeof vi.fn<typeof import('./providers').optimizePrompt>> };
 const oldEnv = { ...process.env };
 async function login(email = 'user@example.test') {
   const response = await request(app).post('/api/auth/login').set('Origin', origin).send({ email, password }).expect(200);
@@ -40,7 +40,7 @@ describe.sequential('security integration with real PostgreSQL', () => {
     passwordHash = await hashPassword(password);
     store = await import('./diskStore');
     const { createApp } = await import('../server');
-    provider = { imageProviderModel: () => 'test-provider', generateImage: vi.fn<typeof import('./providers').generateImage>(), optimizePrompt: vi.fn<typeof import('./providers').optimizePrompt>() };
+    provider = { imageProviderModel: async () => 'test-provider', promptProviderModel: async () => 'test-prompt-provider', generateImage: vi.fn<typeof import('./providers').generateImage>(), optimizePrompt: vi.fn<typeof import('./providers').optimizePrompt>() };
     app = createApp(security, provider);
   }, 30000);
   beforeEach(async () => {
@@ -59,7 +59,7 @@ describe.sequential('security integration with real PostgreSQL', () => {
 
   it('denies anonymous access across all protected route groups', async () => {
     for (const route of ['/api/storage/init','/api/users','/api/templates','/api/assets','/api/audit-logs','/api/storage/stats','/api/storage/backup/export','/api/openrouter/status']) await request(app).get(route).expect(401);
-    for (const route of ['/api/users','/api/templates','/api/assets','/api/audit-logs','/api/storage/backup/import','/api/openrouter/generate','/api/gemini/optimize-prompt','/api/upload-image']) await request(app).post(route).set('Origin', origin).send({}).expect(401);
+    for (const route of ['/api/users','/api/templates','/api/assets','/api/audit-logs','/api/storage/backup/import','/api/openrouter/generate','/api/openrouter/optimize-prompt','/api/gemini/optimize-prompt','/api/upload-image']) await request(app).post(route).set('Origin', origin).send({}).expect(401);
     await request(app).get('/uploads/data/users.json').expect(401);
   });
   it('verifies passwords and rejects client roles and privilege fields', async () => {
@@ -86,7 +86,7 @@ describe.sequential('security integration with real PostgreSQL', () => {
   it('rejects ordinary users on every admin route', async () => {
     const session = await login();
     for (const route of ['/api/users','/api/audit-logs','/api/storage/stats','/api/storage/backup/export']) await call('get', route, session).expect(403);
-    for (const route of ['/api/users','/api/templates','/api/audit-logs','/api/storage/backup/import','/api/gemini/optimize-prompt',`/api/users/${userId}/reset`,`/api/users/${userId}/increment`,'/api/users/reset-all']) await call('post', route, session).send({}).expect(403);
+    for (const route of ['/api/users','/api/templates','/api/audit-logs','/api/storage/backup/import','/api/openrouter/optimize-prompt','/api/gemini/optimize-prompt',`/api/users/${userId}/reset`,`/api/users/${userId}/increment`,'/api/users/reset-all']) await call('post', route, session).send({}).expect(403);
     await call('put', `/api/users/${userId}/limit`, session).send({ limit: 1000 }).expect(403);
     await call('patch', `/api/users/${userId}/permissions`, session).send({ role: 'SUPER_ADMIN', status: 'ACTIVE', apiAccess: true }).expect(403);
     const result = await call('get', '/api/storage/init', session).expect(200);
@@ -152,6 +152,41 @@ describe.sequential('security integration with real PostgreSQL', () => {
     const session = await login();
     await call('post', '/api/openrouter/generate', session).send({ prompt: 'test' }).expect(429);
     expect(provider.generateImage).not.toHaveBeenCalled();
+  });
+  it('optimizes prompts with only OpenRouter and preserves quota accounting for both URLs', async () => {
+    const geminiKey = process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    try {
+      const admin = await login('admin@example.test');
+      provider.optimizePrompt.mockResolvedValue('Polished {{OBJECT}} with studio lighting');
+      for (const route of ['/api/openrouter/optimize-prompt', '/api/gemini/optimize-prompt']) {
+        const result = await call('post', route, admin).send({ basePrompt: '{{OBJECT}}', category: 'Kitchen', model: 'nano-banana-2' }).expect(200);
+        expect(result.body.optimizedPrompt).toBe('Polished {{OBJECT}} with studio lighting');
+      }
+      expect(provider.optimizePrompt).toHaveBeenCalledWith('{{OBJECT}}', 'Kitchen', 'nano-banana-2', 'test-prompt-provider');
+      const [period] = await database.db.select().from(quotaPeriods).where(eq(quotaPeriods.userId, adminId));
+      expect(period).toMatchObject({ reservedUnits: 0, consumedUnits: 2 });
+      await call('post', '/api/openrouter/optimize-prompt', admin).send({ basePrompt: '{{OBJECT}}' }).expect(429);
+      expect(provider.optimizePrompt).toHaveBeenCalledTimes(2);
+    } finally {
+      if (geminiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = geminiKey;
+    }
+  });
+  it('does not accept a Gemini key in place of the single required OpenRouter key', async () => {
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = ' ';
+    try {
+      const admin = await login('admin@example.test');
+      await call('post', '/api/openrouter/generate', admin).send({ prompt: 'test' }).expect(503);
+      await call('post', '/api/openrouter/optimize-prompt', admin).send({ basePrompt: 'test' }).expect(503);
+      expect(provider.generateImage).not.toHaveBeenCalled();
+      expect(provider.optimizePrompt).not.toHaveBeenCalled();
+      expect(await database.db.select().from(generationJobs)).toHaveLength(0);
+    } finally {
+      if (openRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = openRouterKey;
+    }
   });
   it('reserves quota atomically under parallel generation and hides another user’s job', async () => {
     const session = await login(); const other = await login('other@example.test');

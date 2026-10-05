@@ -176,11 +176,14 @@ export function createApp(security = new SecurityService(getDatabase()), provide
     const referenceImageUrl = req.body.referenceImageUrl ? safeImageUrl(req.body.referenceImageUrl, true) : undefined;
     if (referenceImageUrl) ensureImageAccess(referenceImageUrl, identity(res).user, visibleTemplates(res));
     if (!identity(res).user.apiAccess) throw new HttpError(403, 'API access is not enabled for this account.');
-    if (!process.env.OPENROUTER_API_KEY && (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY')) throw new HttpError(503, 'Image provider is not configured.');
-    const job = await security.reserve(identity(res).user.id, 'image', provider.imageProviderModel(), prompt, aspectRatio);
+    if (!process.env.OPENROUTER_API_KEY?.trim()) throw new HttpError(503, 'Image provider is not configured.');
+    let selectedModel: string;
+    try { selectedModel = await provider.imageProviderModel(Boolean(referenceImageUrl)); }
+    catch { throw new HttpError(502, 'Provider model selection failed.'); }
+    const job = await security.reserve(identity(res).user.id, 'image', selectedModel, prompt, aspectRatio);
     void (async () => {
       try {
-        const imageUrl = await provider.generateImage({ prompt, aspectRatio, referenceImageUrl, resolution: req.body.resolution }, job.userId);
+        const imageUrl = await provider.generateImage({ prompt, aspectRatio, referenceImageUrl, resolution: req.body.resolution, selectedModel }, job.userId);
         await security.settle(job.id, true, { imageUrl });
       } catch {
         // Raw provider errors may contain authorization headers or echoed credentials.
@@ -196,16 +199,20 @@ export function createApp(security = new SecurityService(getDatabase()), provide
     const status = job.status === 'SUCCEEDED' ? 'COMPLETED' : ['FAILED', 'CANCELLED', 'EXPIRED'].includes(job.status) ? 'FAILED' : 'PROCESSING';
     res.json({ status, imageUrl: status === 'COMPLETED' ? job.requestMetadata.imageUrl : undefined, error: status === 'FAILED' ? 'Provider request failed.' : null });
   }));
-  app.post('/api/gemini/optimize-prompt', adminOnly, asyncRoute(async (req, res) => {
+  // Preserve the legacy URL for existing clients; both routes use OpenRouter.
+  app.post(['/api/openrouter/optimize-prompt', '/api/gemini/optimize-prompt'], adminOnly, asyncRoute(async (req, res) => {
     strictBody(req.body, ['basePrompt', 'category', 'model']);
     const prompt = stringField(req.body.basePrompt, 20000);
     const category = req.body.category ? stringField(req.body.category, 150) : 'Smart Appliance';
     const model = req.body.model ? stringField(req.body.model, 150) : 'nano-banana-2';
     if (!identity(res).user.apiAccess) throw new HttpError(403, 'API access is not enabled for this account.');
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') throw new HttpError(503, 'Prompt provider is not configured.');
-    const job = await security.reserve(identity(res).user.id, 'prompt', 'gemini-3.7-flash', prompt, '1:1');
+    if (!process.env.OPENROUTER_API_KEY?.trim()) throw new HttpError(503, 'Prompt provider is not configured.');
+    let selectedModel: string;
+    try { selectedModel = await provider.promptProviderModel(); }
+    catch { throw new HttpError(502, 'Provider model selection failed.'); }
+    const job = await security.reserve(identity(res).user.id, 'prompt', selectedModel, prompt, '1:1');
     let optimizedPrompt: string;
-    try { optimizedPrompt = await provider.optimizePrompt(prompt, category, model); }
+    try { optimizedPrompt = await provider.optimizePrompt(prompt, category, model, selectedModel); }
     catch { await security.settle(job.id, false); throw new HttpError(502, 'Provider request failed.'); }
     await security.settle(job.id, true); res.json({ optimizedPrompt: sanitizeBackup(optimizedPrompt) });
   }));

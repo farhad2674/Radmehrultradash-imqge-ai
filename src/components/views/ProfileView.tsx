@@ -184,7 +184,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   <Sparkles className="w-4 h-4" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-semibold text-[#191c23]">Google Gemini 3.7 / Flash Image</h4>
+                  <h4 className="text-xs font-semibold text-[#191c23]">Latest compatible OpenRouter models</h4>
                   <p className="text-[11px] text-[#5F6368]">Prompt Auto-Optimizer & Visual Pipeline</p>
                 </div>
               </div>
